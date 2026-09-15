@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import json
+import threading
+from dataclasses import dataclass
+from datetime import date
+from tkinter import StringVar, Tk, messagebox, ttk
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+
+WEATHER_CODES = {
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Depositing rime fog",
+    51: "Light drizzle",
+    53: "Moderate drizzle",
+    55: "Dense drizzle",
+    61: "Slight rain",
+    63: "Moderate rain",
+    65: "Heavy rain",
+    71: "Slight snow",
+    73: "Moderate snow",
+    75: "Heavy snow",
+    80: "Rain showers",
+    81: "Moderate rain showers",
+    82: "Violent rain showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with hail",
+    99: "Thunderstorm with heavy hail",
+}
+
+
+@dataclass(frozen=True)
+class DailyForecast:
+    day: str
+    condition: str
+    high: float
+    low: float
+    rain_chance: int
+
+
+@dataclass(frozen=True)
+class WeatherReport:
+    location: str
+    current_temperature: float
+    current_condition: str
+    forecasts: list[DailyForecast]
+
+
+def request_json(url: str) -> dict:
+    request = Request(url, headers={"User-Agent": "WeatherForecast/1.0"})
+    with urlopen(request, timeout=15) as response:
+        return json.load(response)
+
+
+def get_weather(city: str) -> WeatherReport:
+    city = city.strip()
+    if not city:
+        raise ValueError("Enter a city name first.")
+
+    location_query = urlencode({"name": city, "count": 1, "language": "en", "format": "json"})
+    location_data = request_json(f"https://geocoding-api.open-meteo.com/v1/search?{location_query}")
+    results = location_data.get("results", [])
+    if not results:
+        raise ValueError(f"No location found for '{city}'.")
+
+    location = results[0]
+    forecast_query = urlencode(
+        {
+            "latitude": location["latitude"],
+            "longitude": location["longitude"],
+            "current": "temperature_2m,weather_code",
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "forecast_days": 7,
+            "temperature_unit": "celsius",
+            "timezone": "auto",
+        }
+    )
+    forecast_data = request_json(f"https://api.open-meteo.com/v1/forecast?{forecast_query}")
+    current = forecast_data["current"]
+    daily = forecast_data["daily"]
+    forecasts = [
+        DailyForecast(
+            day=date.fromisoformat(day).strftime("%a, %b %d"),
+            condition=WEATHER_CODES.get(code, "Unknown conditions"),
+            high=high,
+            low=low,
+            rain_chance=rain_chance,
+        )
+        for day, code, high, low, rain_chance in zip(
+            daily["time"],
+            daily["weather_code"],
+            daily["temperature_2m_max"],
+            daily["temperature_2m_min"],
+            daily["precipitation_probability_max"],
+        )
+    ]
+    place = ", ".join(part for part in (location.get("name"), location.get("country")) if part)
+    return WeatherReport(
+        location=place,
+        current_temperature=current["temperature_2m"],
+        current_condition=WEATHER_CODES.get(current["weather_code"], "Unknown conditions"),
+        forecasts=forecasts,
+    )
+
+
+class WeatherApp:
+    def __init__(self, root: Tk) -> None:
+        self.root = root
+        self.root.title("Weather Forecast")
+        self.root.geometry("720x560")
+        self.root.minsize(620, 460)
+        self.city = StringVar(value="London")
+        self.status = StringVar(value="Search for a city to see the 7-day forecast.")
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        style = ttk.Style()
+        style.configure("Title.TLabel", font=("Segoe UI", 24, "bold"), foreground="#17324d")
+        style.configure("Current.TLabel", font=("Segoe UI", 32, "bold"), foreground="#0e7490")
+        style.configure("Condition.TLabel", font=("Segoe UI", 13), foreground="#41606f")
+        style.configure("Forecast.TLabel", font=("Segoe UI", 10))
+
+        outer = ttk.Frame(self.root, padding=24)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="Weather Forecast", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(outer, text="Live conditions and the week ahead", style="Condition.TLabel").pack(anchor="w", pady=(2, 18))
+
+        search = ttk.Frame(outer)
+        search.pack(fill="x", pady=(0, 18))
+        entry = ttk.Entry(search, textvariable=self.city, font=("Segoe UI", 12))
+        entry.pack(side="left", fill="x", expand=True, ipady=6)
+        entry.bind("<Return>", lambda _event: self.load_weather())
+        ttk.Button(search, text="Get forecast", command=self.load_weather).pack(side="left", padx=(10, 0), ipady=5)
+
+        self.current_frame = ttk.LabelFrame(outer, text="Current weather", padding=16)
+        self.current_frame.pack(fill="x", pady=(0, 18))
+        self.location_label = ttk.Label(self.current_frame, text="", style="Condition.TLabel")
+        self.location_label.pack(anchor="w")
+        self.temperature_label = ttk.Label(self.current_frame, text="--", style="Current.TLabel")
+        self.temperature_label.pack(anchor="w")
+        self.condition_label = ttk.Label(self.current_frame, text="", style="Condition.TLabel")
+        self.condition_label.pack(anchor="w")
+
+        ttk.Label(outer, text="7-day forecast", font=("Segoe UI", 13, "bold"), foreground="#17324d").pack(anchor="w")
+        self.forecast_frame = ttk.Frame(outer)
+        self.forecast_frame.pack(fill="both", expand=True, pady=(8, 0))
+        ttk.Label(outer, textvariable=self.status, style="Condition.TLabel").pack(anchor="w", pady=(12, 0))
+
+    def load_weather(self) -> None:
+        self.status.set("Loading forecast...")
+        threading.Thread(target=self._fetch_weather, daemon=True).start()
+
+    def _fetch_weather(self) -> None:
+        try:
+            report = get_weather(self.city.get())
+        except Exception as error:  # Network and API errors belong in the UI.
+            self.root.after(0, lambda: self._show_error(str(error)))
+            return
+        self.root.after(0, lambda: self._display(report))
+
+    def _show_error(self, message: str) -> None:
+        self.status.set("Could not load the forecast.")
+        messagebox.showerror("Weather forecast", message)
+
+    def _display(self, report: WeatherReport) -> None:
+        self.location_label.config(text=report.location)
+        self.temperature_label.config(text=f"{report.current_temperature:.0f}°C")
+        self.condition_label.config(text=report.current_condition)
+        for child in self.forecast_frame.winfo_children():
+            child.destroy()
+        for forecast in report.forecasts:
+            card = ttk.Frame(self.forecast_frame, padding=8, relief="ridge")
+            card.pack(side="left", fill="both", expand=True, padx=(0, 6))
+            ttk.Label(card, text=forecast.day, style="Forecast.TLabel").pack(anchor="w")
+            ttk.Label(card, text=forecast.condition, wraplength=90, style="Forecast.TLabel").pack(anchor="w", pady=(8, 8))
+            ttk.Label(card, text=f"{forecast.high:.0f}° / {forecast.low:.0f}°C", style="Forecast.TLabel").pack(anchor="w")
+            ttk.Label(card, text=f"Rain {forecast.rain_chance}%", style="Forecast.TLabel").pack(anchor="w", pady=(4, 0))
+        self.status.set("Forecast updated.")
+
+
+if __name__ == "__main__":
+    app_root = Tk()
+    WeatherApp(app_root)
+    app_root.mainloop()

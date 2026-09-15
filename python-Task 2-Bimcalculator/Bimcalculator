@@ -1,0 +1,43 @@
+"""Command-line Body Mass Index calculator."""
+
+import math
+
+
+def classify_bmi(bmi: float) -> str:
+    """Return the standard health category for a BMI value."""
+    if bmi < 18.5:
+        return "Underweight"
+    if bmi < 25:
+        return "Normal"
+    if bmi < 30:
+        return "Overweight"
+    return "Obese"
+
+
+def main() -> None:
+    """Run the BMI calculator one step at a time."""
+    # Step 1: Get the user's measurements.
+    try:
+        weight = float(input("Enter your weight in kilograms: "))
+        height = float(input("Enter your height in meters: "))
+    except ValueError:
+        print("Error: please enter numeric values for weight and height.")
+        return
+
+    # Step 2: Check that the measurements can be used safely.
+    if weight <= 0 or height <= 0:
+        print("Error: weight and height must be greater than zero.")
+        return
+
+    # Step 3: Calculate BMI using weight / height squared.
+    bmi = weight / (height**2)
+
+    # Step 4: Assign the BMI to a standard health category.
+    category = classify_bmi(bmi)
+
+    # Step 5: Display the result rounded to two decimal places.
+    print(f"Your BMI is {bmi:.2f} ({category}).")
+
+
+if __name__ == "__main__":
+    main()
